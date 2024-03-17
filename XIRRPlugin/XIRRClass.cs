@@ -1,29 +1,24 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-using System.Web.UI.WebControls;
-using Microsoft.Crm.Sdk;
 using Microsoft.Xrm.Sdk;
 using Microsoft.Xrm.Sdk.Query;
-using static System.IdentityModel.Tokens.SecurityTokenHandlerCollectionManager;
+using Microsoft.Xrm.Sdk.Messages;
 
 namespace XIRRPlugin
 {
     public class XIRRClass : IPlugin
     {
-        private object conditionoperator;
-        private object loanid;
+        private EntityReference loanRef;
 
         void IPlugin.Execute(IServiceProvider serviceProvider)
         {
-            IPluginExecutionContext context = (IPluginExecutionContext) serviceProvider.GetService(typeof(IPluginExecutionContext));
-            IOrganizationServiceFactory serviceFactory = (IOrganizationServiceFactory)serviceProvider.GetService(typeof(IOrganizationServiceFactory));
-            IOrganizationService organizationService = serviceFactory.CreateOrganizationService(context.UserId);
-
-            ITracingService tracingService = (ITracingService) serviceProvider.GetService(typeof(ITracingService));
-
+            IPluginExecutionContext         context = (IPluginExecutionContext)serviceProvider.GetService(typeof(IPluginExecutionContext));
+            IOrganizationServiceFactory     serviceFactory = (IOrganizationServiceFactory)serviceProvider.GetService(typeof(IOrganizationServiceFactory));
+            IOrganizationService            organizationService = serviceFactory.CreateOrganizationService(context.UserId);
+            
+            ITracingService                 tracingService = (ITracingService)serviceProvider.GetService(typeof(ITracingService));
+            //int tracingStep = 1;
+            //tracingService.Trace("Stage {0}", ++tracingStep);
 
             if (context != null)
             {
@@ -33,15 +28,15 @@ namespace XIRRPlugin
                     {
                         Entity updatedTransaction = (Entity)context.PreEntityImages["PreImageXIRR"];
 
-                        // Check if the updated record has the necessary attributes
+                        //Check if the updated record has the necessary attributes
                         if (updatedTransaction.Attributes.Contains("cr471_loanid"))
                         {
                             // Retrieve the loanId from the updated record
-                            EntityReference loanRef = (EntityReference)updatedTransaction.Attributes["cr471_loanid"];
+                            loanRef = (EntityReference)updatedTransaction.Attributes["cr471_loanid"];
 
-                            // retrieve all cr471_transactions records with the same loanid
+                            // retrieve all transactions records with the same loanid
                             QueryExpression query = new QueryExpression("cr471_transaction");
-                            query.ColumnSet = new ColumnSet("cr471_cashflow","cr471_date"); // add other required fields
+                            query.ColumnSet = new ColumnSet("cr471_cashflow", "cr471_date");
                             query.Criteria.AddCondition("cr471_loanid", ConditionOperator.Equal, loanRef.Id);
 
                             EntityCollection transactions = organizationService.RetrieveMultiple(query);
@@ -62,23 +57,38 @@ namespace XIRRPlugin
                                 cashflows.Add(cashflow);
                             }
 
-                            //double[] cashFlows = { -1000, 200, 300, 400, 500 };
-                            //double[] dates = { 0, 30, 60, 90, 120 }; // Days from the start of the investment
-
-                            decimal xirr = (decimal)CalculateXIRR(cashflows, dates);
-
-                            // Do something with the xirrResult, such as updating a field on the loan record
-                            //...
+                            UpdateLoan(organizationService, loanRef, (decimal)CalculateXIRR(cashflows, dates));
                         }
                     }
                 }
-                catch (Exception)
+                catch (Exception ex)
                 {
-
-                    throw new InvalidPluginExecutionException("Error during the XIRR plugin execution");
+                    throw new InvalidPluginExecutionException("XIRR Plugin : error during XIRR calculation", ex);
                 }
+            }
+        }
 
+        private void UpdateLoan(IOrganizationService _service, EntityReference _entityRef, decimal _xirr)
+        {
+            try
+            {
+                Entity loanEntity = _service.Retrieve("cr471_loans", _entityRef.Id, new ColumnSet("cr471_xirr"));
 
+                Entity newLoan = new Entity("cr471_loans", loanEntity.Id);
+                newLoan["cr471_xirr"] = _xirr;
+                newLoan.RowVersion = loanEntity.RowVersion;// Set the row version for concurrency behavior. Error -2147088253 will occur if this is not set
+
+                UpdateRequest request = new UpdateRequest()
+                {
+                    Target = newLoan, // The operation will fail if the record is updated in the period since it was retrieved.
+                    ConcurrencyBehavior = ConcurrencyBehavior.IfRowVersionMatches
+                };
+
+                _service.Execute(request);
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidPluginExecutionException("XIRR Plugin : error during loan update", ex);
             }
         }
 
@@ -103,7 +113,7 @@ namespace XIRRPlugin
                 x0 = x1;
             }
 
-            throw new InvalidOperationException("XIRR calculation did not converge to a solution.");
+            throw new InvalidPluginExecutionException("XIRR Plugin : calculation did not converge to a solution");
         }
 
         private static double CalculateXIRREquation(List<decimal> cashFlows, List<DateTime> dates, double rate)
